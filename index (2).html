@@ -1059,3 +1059,460 @@ function printAttendance() {
     w.document.write(`<html dir="rtl"><head><title>تقرير الغيابات</title><style>body{font-family:Arial;padding:40px;}table{width:100%;border-collapse:collapse;margin:20px 0;}th,td{border:1px solid #ddd;padding:10px;text-align:right;}th{background:#1a5f7a;color:white;}.header{text-align:center;margin-bottom:30px;}</style></head><body><div class="header"><h2>${settings.companyName}</h2><h3>تقرير الغيابات</h3><p>${new Date().toLocaleDateString('ar-SA')}</p></div><div class="table-responsive">${document.querySelector('#attendanceSection .table-responsive').innerHTML}</div></body></html>`);
     w.document.close(); w.print();
 }
+
+    // ==================== PAYROLL ====================
+function openPayrollModal() {
+    if (!payrollModal) payrollModal = new bootstrap.Modal(document.getElementById('payrollModal'));
+    document.getElementById('payrollRunTableContainer').style.display = 'none';
+    document.getElementById('btnSavePayroll').style.display = 'none';
+    currentPayrollRun = [];
+    payrollModal.show();
+}
+
+function generatePayrollRun() {
+    const month = parseInt(document.getElementById('payrollMonth').value);
+    const year = parseInt(document.getElementById('payrollYear').value);
+    const employees = Storage.get('employees') || [];
+    const attendance = Storage.get('attendance') || [];
+    const leaves = Storage.get('leaves') || [];
+    const settings = Storage.get('settings') || { workDays: 30 };
+    
+    currentPayrollRun = [];
+    const tbody = document.getElementById('payrollRunTable');
+    tbody.innerHTML = '';
+    
+    employees.forEach((emp, i) => {
+        const empAtt = attendance.filter(a => {
+            const d = new Date(a.date);
+            return a.employeeId === emp.id && (d.getMonth() + 1) === month && d.getFullYear() === year;
+        });
+        const absenceDays = empAtt.reduce((s, a) => s + (a.days || 1), 0);
+        const dailySalary = emp.salary / settings.workDays;
+        const absenceDeduction = dailySalary * absenceDays;
+        
+        const empLeaves = leaves.filter(l => {
+            const start = new Date(l.startDate);
+            return l.employeeId === emp.id && l.status === 'مقبولة' && (start.getMonth() + 1) === month && start.getFullYear() === year;
+        });
+        let leaveDeduction = 0;
+        empLeaves.forEach(l => {
+            if (l.type === 'بدون راتب' || l.type === 'سنوية') {
+                const start = new Date(l.startDate);
+                const end = new Date(l.endDate);
+                const days = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1);
+                leaveDeduction += dailySalary * days;
+            }
+        });
+        
+        let allowancesTotal = 0;
+        let allowancesText = '-';
+        if (emp.allowances && emp.allowances.length > 0) {
+            allowancesTotal = emp.allowances.reduce((s, a) => s + (a.amount || 0), 0);
+            allowancesText = emp.allowances.map(a => a.name).join(', ');
+        }
+        
+        const netSalary = emp.status === 'إجازة' ? 0 : (emp.salary + allowancesTotal - absenceDeduction - leaveDeduction);
+        
+        currentPayrollRun.push({
+            employeeId: emp.id,
+            baseSalary: emp.baseSalary || emp.salary,
+            allowances: emp.allowances || [],
+            allowancesTotal: allowancesTotal,
+            absenceDeduction: absenceDeduction,
+            leaveDeduction: leaveDeduction,
+            penaltyDeduction: 0,
+            netSalary: netSalary,
+            status: emp.status
+        });
+        
+        tbody.innerHTML += `<tr><td>${i+1}</td><td>${emp.number}</td><td>${emp.name}</td><td>${formatMoney(emp.baseSalary || emp.salary)}</td><td>${allowancesText}</td><td>${formatMoney(absenceDeduction)}</td><td>${formatMoney(leaveDeduction)}</td><td><input type="number" class="form-control form-control-sm" id="penalty_${emp.id}" value="0" min="0" onchange="updatePayrollNet(${emp.id})"></td><td id="net_${emp.id}">${formatMoney(netSalary)}</td></tr>`;
+    });
+    
+    document.getElementById('payrollRunTableContainer').style.display = 'block';
+    document.getElementById('btnSavePayroll').style.display = 'inline-block';
+}
+
+function updatePayrollNet(empId) {
+    const penalty = parseFloat(document.getElementById('penalty_' + empId).value) || 0;
+    const record = currentPayrollRun.find(r => r.employeeId === empId);
+    if (record) {
+        record.penaltyDeduction = penalty;
+        record.netSalary = record.status === 'إجازة' ? 0 : (record.baseSalary + record.allowancesTotal - record.absenceDeduction - record.leaveDeduction - penalty);
+        document.getElementById('net_' + empId).textContent = formatMoney(record.netSalary);
+    }
+}
+
+function savePayrollRun() {
+    const month = parseInt(document.getElementById('payrollMonth').value);
+    const year = parseInt(document.getElementById('payrollYear').value);
+    const payrollRuns = Storage.get('payrollRuns') || [];
+    const filtered = payrollRuns.filter(r => !(r.month === month && r.year === year));
+    
+    filtered.push({
+        id: Date.now(),
+        month: month,
+        year: year,
+        dateCreated: new Date().toISOString(),
+        records: currentPayrollRun
+    });
+    
+    Storage.set('payrollRuns', filtered);
+    payrollModal.hide();
+    renderPayrollRuns();
+    showToast('success', 'تم حفظ مسير الراتب');
+}
+
+function renderPayrollRuns() {
+    const runs = Storage.get('payrollRuns') || [];
+    const container = document.getElementById('payrollRunsList');
+    if (runs.length === 0) {
+        container.innerHTML = '<div class="empty-state"><i class="fas fa-money-bill-wave"></i><h5>لا توجد مسيرات رواتب</h5></div>';
+        return;
+    }
+    container.innerHTML = '';
+    runs.sort((a, b) => (b.year - a.year) || (b.month - a.month)).forEach(run => {
+        const monthNames = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+        const totalNet = run.records.reduce((s, r) => s + r.netSalary, 0);
+        container.innerHTML += `<div class="payroll-month-card" onclick="viewPayrollRun(${run.id})"><div class="d-flex justify-content-between align-items-center"><div><h5 class="mb-1"><i class="fas fa-calendar-alt me-2 text-primary"></i>${monthNames[run.month-1]} ${run.year}</h5><p class="mb-0 text-muted">${run.records.length} موظف | إجمالي: ${formatMoney(totalNet)}</p></div><button class="btn btn-info btn-sm"><i class="fas fa-eye"></i> عرض</button></div></div>`;
+    });
+}
+
+function viewPayrollRun(runId) {
+    const runs = Storage.get('payrollRuns') || [];
+    const run = runs.find(r => r.id === runId);
+    if (!run) return;
+    const employees = Storage.get('employees') || [];
+    const monthNames = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+    
+    let html = `<div class="card-box"><h5>مسير راتب ${monthNames[run.month-1]} ${run.year}</h5><div class="table-responsive"><table class="table table-hover"><thead><tr><th>#</th><th>الرقم</th><th>الاسم</th><th>الراتب الأساسي</th><th>البدلات</th><th>خصم الغياب</th><th>خصم الإجازة</th><th>جزاءات</th><th>صافي الراتب</th></tr></thead><tbody>`;
+    run.records.forEach((rec, i) => {
+        const emp = employees.find(e => e.id === rec.employeeId);
+        html += `<tr><td>${i+1}</td><td>${emp ? emp.number : '-'}</td><td>${emp ? emp.name : 'غير معروف'}</td><td>${formatMoney(rec.baseSalary)}</td><td>${formatMoney(rec.allowancesTotal)}</td><td>${formatMoney(rec.absenceDeduction)}</td><td>${formatMoney(rec.leaveDeduction)}</td><td>${formatMoney(rec.penaltyDeduction)}</td><td><strong>${formatMoney(rec.netSalary)}</strong></td></tr>`;
+    });
+    html += `</tbody></table></div><button class="btn btn-info" onclick="printPayrollRun(${runId})"><i class="fas fa-print me-2"></i> طباعة</button></div>`;
+    
+    const container = document.getElementById('payrollRunsList');
+    container.innerHTML = html + `<div class="mt-3"><button class="btn btn-secondary" onclick="renderPayrollRuns()"><i class="fas fa-arrow-right me-2"></i> رجوع للقائمة</button></div>`;
+}
+
+function printPayrollRun(runId) {
+    const runs = Storage.get('payrollRuns') || [];
+    const run = runs.find(r => r.id === runId);
+    if (!run) return;
+    const settings = Storage.get('settings') || {};
+    const monthNames = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+    const w = window.open('', '_blank');
+    w.document.write(`<html dir="rtl"><head><title>مسير راتب</title><style>body{font-family:Arial;padding:40px;}table{width:100%;border-collapse:collapse;margin:20px 0;}th,td{border:1px solid #ddd;padding:10px;text-align:right;}th{background:#1a5f7a;color:white;}.header{text-align:center;margin-bottom:30px;}</style></head><body><div class="header"><h2>${settings.companyName}</h2><h3>مسير راتب ${monthNames[run.month-1]} ${run.year}</h3><p>${new Date().toLocaleDateString('ar-SA')}</p></div><table><thead><tr><th>#</th><th>الرقم</th><th>الاسم</th><th>الراتب الأساسي</th><th>البدلات</th><th>خصم الغياب</th><th>خصم الإجازة</th><th>جزاءات</th><th>صافي الراتب</th></tr></thead><tbody>${run.records.map((r,i) => `<tr><td>${i+1}</td><td>${r.number || '-'}</td><td>${r.name || 'غير معروف'}</td><td>${formatMoney(r.baseSalary)}</td><td>${formatMoney(r.allowancesTotal)}</td><td>${formatMoney(r.absenceDeduction)}</td><td>${formatMoney(r.leaveDeduction)}</td><td>${formatMoney(r.penaltyDeduction)}</td><td><strong>${formatMoney(r.netSalary)}</strong></td></tr>`).join('')}</tbody></table></body></html>`);
+    w.document.close(); w.print();
+}
+
+// ==================== REPORTS ====================
+function showReportTab(tab) {
+    ['financial','employees','leaves','attendance'].forEach(t => {
+        document.getElementById('report' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = (t === tab) ? 'block' : 'none';
+        document.getElementById('tab-' + t).classList.toggle('active', t === tab);
+    });
+}
+
+function initReportFilters() {
+    const settings = Storage.get('settings') || {};
+    const employees = Storage.get('employees') || [];
+    populateSelect('repEmpDept', settings.departments, 'الكل');
+    populateSelect('repEmpBranch', settings.branches, 'الكل');
+    populateSelect('repEmpPosition', settings.positions, 'الكل');
+    populateSelect('repEmpNationality', settings.nationalities, 'الكل');
+    populateSelect('repEmpStatus', settings.statuses, 'الكل');
+    
+    const empSelects = ['repFinEmployee', 'repAttEmployee'];
+    empSelects.forEach(id => {
+        const sel = document.getElementById(id);
+        if (sel) {
+            sel.innerHTML = '<option value="">الكل</option>';
+            employees.forEach(e => sel.innerHTML += `<option value="${e.id}">${e.number} - ${e.name}</option>`);
+        }
+    });
+}
+
+function generateFinancialReport() {
+    const runs = Storage.get('payrollRuns') || [];
+    const from = document.getElementById('repFinFrom').value;
+    const to = document.getElementById('repFinTo').value;
+    const month = document.getElementById('repFinMonth').value;
+    const year = document.getElementById('repFinYear').value;
+    const empId = document.getElementById('repFinEmployee').value;
+    
+    let filtered = runs.filter(r => {
+        const matchFrom = !from || r.dateCreated >= from;
+        const matchTo = !to || r.dateCreated <= to;
+        const matchMonth = !month || r.month === parseInt(month);
+        const matchYear = !year || r.year === parseInt(year);
+        return matchFrom && matchTo && matchMonth && matchYear;
+    });
+    
+    let totalBase = 0, totalAllowances = 0, totalAbsence = 0, totalLeave = 0, totalPenalty = 0, totalNet = 0;
+    let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>الشهر/السنة</th><th>الراتب الأساسي</th><th>البدلات</th><th>خصم الغياب</th><th>خصم الإجازة</th><th>جزاءات</th><th>صافي الراتب</th></tr></thead><tbody>';
+    
+    filtered.forEach(run => {
+        const records = empId ? run.records.filter(r => r.employeeId === parseInt(empId)) : run.records;
+        const base = records.reduce((s, r) => s + r.baseSalary, 0);
+        const allw = records.reduce((s, r) => s + r.allowancesTotal, 0);
+        const abs = records.reduce((s, r) => s + r.absenceDeduction, 0);
+        const lev = records.reduce((s, r) => s + r.leaveDeduction, 0);
+        const pen = records.reduce((s, r) => s + r.penaltyDeduction, 0);
+        const net = records.reduce((s, r) => s + r.netSalary, 0);
+        totalBase += base; totalAllowances += allw; totalAbsence += abs; totalLeave += lev; totalPenalty += pen; totalNet += net;
+        html += `<tr><td>${run.month}/${run.year}</td><td>${formatMoney(base)}</td><td>${formatMoney(allw)}</td><td>${formatMoney(abs)}</td><td>${formatMoney(lev)}</td><td>${formatMoney(pen)}</td><td><strong>${formatMoney(net)}</strong></td></tr>`;
+    });
+    
+    html += `</tbody><tfoot><tr class="table-primary"><th>الإجمالي</th><th>${formatMoney(totalBase)}</th><th>${formatMoney(totalAllowances)}</th><th>${formatMoney(totalAbsence)}</th><th>${formatMoney(totalLeave)}</th><th>${formatMoney(totalPenalty)}</th><th>${formatMoney(totalNet)}</th></tr></tfoot></table></div>`;
+    document.getElementById('financialReportResult').innerHTML = html;
+}
+
+function generateEmployeesReport() {
+    const employees = Storage.get('employees') || [];
+    const fDept = document.getElementById('repEmpDept').value;
+    const fBranch = document.getElementById('repEmpBranch').value;
+    const fPos = document.getElementById('repEmpPosition').value;
+    const fNat = document.getElementById('repEmpNationality').value;
+    const fStatus = document.getElementById('repEmpStatus').value;
+    
+    let filtered = employees.filter(e => {
+        return (!fDept || e.department === fDept) && (!fBranch || e.branch === fBranch) && (!fPos || e.position === fPos) && (!fNat || e.nationality === fNat) && (!fStatus || e.status === fStatus);
+    });
+    
+    let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>#</th><th>الرقم</th><th>الاسم</th><th>الإدارة</th><th>الفرع</th><th>المسمى</th><th>الجنسية</th><th>الحالة</th><th>الراتب</th></tr></thead><tbody>';
+    filtered.forEach((e, i) => {
+        html += `<tr><td>${i+1}</td><td>${e.number}</td><td><a href="#" onclick="showEmployeeDetails(${e.id})">${e.name}</a></td><td>${e.department || '-'}</td><td>${e.branch}</td><td>${e.position}</td><td>${e.nationality}</td><td>${e.status}</td><td>${formatMoney(e.salary)}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('employeesReportResult').innerHTML = html;
+}
+
+function showEmployeeDetails(empId) {
+    const emp = (Storage.get('employees') || []).find(e => e.id === empId);
+    if (!emp) return;
+    const w = window.open('', '_blank');
+    w.document.write(`<html dir="rtl"><head><title>${emp.name}</title><style>body{font-family:Arial;padding:40px;}table{width:100%;border-collapse:collapse;margin:15px 0;}th,td{border:1px solid #ddd;padding:10px;text-align:right;}th{background:#1a5f7a;color:white;}</style></head><body><h2>بيانات الموظف: ${emp.name}</h2><table><tr><th colspan="2">المعلومات الأساسية</th></tr><tr><td>الرقم الوظيفي</td><td>${emp.number}</td></tr><tr><td>الإدارة</td><td>${emp.department || '-'}</td></tr><tr><td>الفرع</td><td>${emp.branch}</td></tr><tr><td>المسمى</td><td>${emp.position}</td></tr><tr><td>الجنسية</td><td>${emp.nationality}</td></tr><tr><td>الحالة</td><td>${emp.status}</td></tr><tr><td>الراتب</td><td>${formatMoney(emp.salary)}</td></tr></table></body></html>`);
+    w.document.close();
+}
+
+function generateLeavesReport() {
+    const leaves = Storage.get('leaves') || [];
+    const employees = Storage.get('employees') || [];
+    const from = document.getElementById('repLeaveFrom').value;
+    const to = document.getElementById('repLeaveTo').value;
+    const month = document.getElementById('repLeaveMonth').value;
+    const year = document.getElementById('repLeaveYear').value;
+    const status = document.getElementById('repLeaveStatus').value;
+    
+    let filtered = leaves.filter(l => {
+        const start = new Date(l.startDate);
+        const matchFrom = !from || l.startDate >= from;
+        const matchTo = !to || l.startDate <= to;
+        const matchMonth = !month || (start.getMonth() + 1) === parseInt(month);
+        const matchYear = !year || start.getFullYear() === parseInt(year);
+        const matchStatus = !status || l.status === status;
+        return matchFrom && matchTo && matchMonth && matchYear && matchStatus;
+    });
+    
+    let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>#</th><th>الموظف</th><th>النوع</th><th>من</th><th>إلى</th><th>الحالة</th><th>السبب</th></tr></thead><tbody>';
+    filtered.forEach((l, i) => {
+        const emp = employees.find(e => e.id === l.employeeId);
+        html += `<tr><td>${i+1}</td><td>${emp ? emp.name : 'غير معروف'}</td><td>${l.type}</td><td>${l.startDate}</td><td>${l.endDate}</td><td>${l.status}</td><td>${l.reason || '-'}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('leavesReportResult').innerHTML = html;
+}
+
+function generateAttendanceReport() {
+    const attendance = Storage.get('attendance') || [];
+    const employees = Storage.get('employees') || [];
+    const from = document.getElementById('repAttFrom').value;
+    const to = document.getElementById('repAttTo').value;
+    const month = document.getElementById('repAttMonth').value;
+    const year = document.getElementById('repAttYear').value;
+    const empId = document.getElementById('repAttEmployee').value;
+    const settings = Storage.get('settings') || { workDays: 30 };
+    
+    let filtered = attendance.filter(a => {
+        const d = new Date(a.date);
+        const matchFrom = !from || a.date >= from;
+        const matchTo = !to || a.date <= to;
+        const matchMonth = !month || (d.getMonth() + 1) === parseInt(month);
+        const matchYear = !year || d.getFullYear() === parseInt(year);
+        const matchEmp = !empId || a.employeeId === parseInt(empId);
+        return matchFrom && matchTo && matchMonth && matchYear && matchEmp;
+    });
+    
+    let html = '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>#</th><th>الموظف</th><th>الفرع</th><th>التاريخ</th><th>الأيام</th><th>الخصم</th></tr></thead><tbody>';
+    filtered.forEach((a, i) => {
+        const emp = employees.find(e => e.id === a.employeeId);
+        const daily = emp ? emp.salary / settings.workDays : 0;
+        html += `<tr><td>${i+1}</td><td>${emp ? emp.name : 'غير معروف'}</td><td>${emp ? emp.branch : '-'}</td><td>${a.date}</td><td>${a.days}</td><td>${formatMoney(daily * a.days)}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('attendanceReportResult').innerHTML = html;
+}
+
+function printReportResult(type) {
+    const settings = Storage.get('settings') || {};
+    const contentMap = { financial: 'financialReportResult', employees: 'employeesReportResult', leaves: 'leavesReportResult', attendance: 'attendanceReportResult' };
+    const titles = { financial: 'التقرير المالي', employees: 'تقرير الموظفين', leaves: 'تقرير الإجازات', attendance: 'تقرير الغيابات' };
+    const content = document.getElementById(contentMap[type]).innerHTML;
+    if (!content) { showToast('warning', 'لا يوجد محتوى للطباعة'); return; }
+    const w = window.open('', '_blank');
+    w.document.write(`<html dir="rtl"><head><title>${titles[type]}</title><style>body{font-family:Arial;padding:40px;}table{width:100%;border-collapse:collapse;margin:20px 0;}th,td{border:1px solid #ddd;padding:10px;text-align:right;}th{background:#1a5f7a;color:white;}.header{text-align:center;margin-bottom:30px;}</style></head><body><div class="header"><h2>${settings.companyName}</h2><h3>${titles[type]}</h3><p>${new Date().toLocaleDateString('ar-SA')}</p></div>${content}</body></html>`);
+    w.document.close(); w.print();
+}
+
+// ==================== USERS ====================
+function openUserModal(userId) {
+    if (!userModal) userModal = new bootstrap.Modal(document.getElementById('userModal'));
+    document.getElementById('userForm').reset();
+    document.getElementById('userId').value = '';
+    if (userId) {
+        const user = (Storage.get('users') || []).find(u => u.id === userId);
+        if (user) {
+            document.getElementById('userId').value = user.id;
+            document.getElementById('userFullName').value = user.fullName;
+            document.getElementById('userUsername').value = user.username;
+            document.getElementById('userPassword').value = user.password;
+            document.getElementById('userRole').value = user.role;
+            document.getElementById('userActive').value = user.active.toString();
+        }
+    }
+    userModal.show();
+}
+
+function saveUser() {
+    const id = document.getElementById('userId').value;
+    const users = Storage.get('users') || [];
+    const username = document.getElementById('userUsername').value.trim();
+    if (!id && users.find(u => u.username === username)) { showToast('warning', 'اسم المستخدم موجود'); return; }
+    const data = { id: id ? parseInt(id) : Date.now(), fullName: document.getElementById('userFullName').value, username: username, password: document.getElementById('userPassword').value, role: document.getElementById('userRole').value, active: document.getElementById('userActive').value === 'true' };
+    if (id) { const idx = users.findIndex(u => u.id === parseInt(id)); if (idx > -1) users[idx] = data; } else { users.push(data); }
+    Storage.set('users', users);
+    userModal.hide();
+    renderUsers();
+    showToast('success', 'تم الحفظ');
+}
+
+function deleteUser(id) {
+    if (id === currentUser.id) { showToast('danger', 'لا يمكن حذف حسابك'); return; }
+    if (!confirm('هل أنت متأكد؟')) return;
+    let users = Storage.get('users') || [];
+    users = users.filter(u => u.id !== id);
+    Storage.set('users', users);
+    renderUsers();
+    showToast('success', 'تم الحذف');
+}
+
+function renderUsers() {
+    const users = Storage.get('users') || [];
+    const container = document.getElementById('usersList');
+    container.innerHTML = '';
+    users.forEach(user => {
+        const perms = { admin: ['كل الصلاحيات'], hr: ['إدارة الموظفين', 'الإجازات', 'الغياب'], viewer: ['عرض التقارير فقط'] };
+        container.innerHTML += `<div class="user-card"><div class="d-flex justify-content-between align-items-start"><div><h6 class="mb-1"><i class="fas fa-user me-2 text-primary"></i>${user.fullName}</h6><p class="mb-1 text-muted"><i class="fas fa-at me-2"></i>${user.username}</p><p class="mb-1"><span class="badge bg-${user.role === 'admin' ? 'danger' : user.role === 'hr' ? 'warning' : 'info'}">${getRoleName(user.role)}</span> <span class="badge bg-${user.active ? 'success' : 'secondary'}">${user.active ? 'نشط' : 'معطل'}</span></p><div>${(perms[user.role] || []).map(p => `<span class="permission-tag">${p}</span>`).join('')}</div></div><div><button class="btn btn-sm btn-warning" onclick="openUserModal(${user.id})"><i class="fas fa-edit"></i></button> <button class="btn btn-sm btn-danger" onclick="deleteUser(${user.id})"><i class="fas fa-trash"></i></button></div></div></div>`;
+    });
+}
+
+// ==================== DASHBOARD & CHARTS ====================
+function renderDashboard() {
+    const employees = Storage.get('employees') || [];
+    const activeCount = employees.filter(e => e.status === 'نشط').length;
+    const leaveCount = employees.filter(e => e.status === 'إجازة').length;
+    const totalSalaries = employees.reduce((sum, e) => sum + (e.status === 'إجازة' ? 0 : e.salary), 0);
+    document.getElementById('totalEmployees').textContent = employees.length;
+    document.getElementById('activeEmployees').textContent = activeCount;
+    document.getElementById('onLeaveEmployees').textContent = leaveCount;
+    document.getElementById('totalSalaries').textContent = formatMoney(totalSalaries);
+    renderBranchChart();
+    renderNationalityChart();
+    renderPositionChart();
+    renderRecentLeaves();
+}
+
+function renderRecentLeaves() {
+    const leaves = Storage.get('leaves') || [];
+    const employees = Storage.get('employees') || [];
+    const container = document.getElementById('recentLeavesList');
+    const recent = leaves.slice(-5).reverse();
+    if (recent.length === 0) { container.innerHTML = '<div class="text-center text-muted py-3">لا توجد إجازات</div>'; return; }
+    container.innerHTML = '<ul class="list-group list-group-flush">';
+    recent.forEach(leave => {
+        const emp = employees.find(e => e.id === leave.employeeId);
+        container.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center"><div><i class="fas fa-user text-primary me-2"></i>${emp ? emp.name : 'غير معروف'}<br><small class="text-muted">${leave.type} | ${leave.startDate}</small></div><span class="badge bg-warning">${leave.status}</span></li>`;
+    });
+    container.innerHTML += '</ul>';
+}
+
+function renderBranchChart() {
+    const employees = Storage.get('employees') || [];
+    const branches = {};
+    employees.forEach(e => { branches[e.branch] = (branches[e.branch] || 0) + 1; });
+    const ctx = document.getElementById('branchChart');
+    if (!ctx) return;
+    if (branchChart) branchChart.destroy();
+    branchChart = new Chart(ctx, { type: 'doughnut', data: { labels: Object.keys(branches), datasets: [{ data: Object.values(branches), backgroundColor: ['#1a5f7a', '#159895', '#57c5b6', '#e74c3c', '#f39c12'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } } });
+}
+
+function renderNationalityChart() {
+    const employees = Storage.get('employees') || [];
+    const nationalities = {};
+    employees.forEach(e => { nationalities[e.nationality] = (nationalities[e.nationality] || 0) + 1; });
+    const ctx = document.getElementById('nationalityChart');
+    if (!ctx) return;
+    if (nationalityChart) nationalityChart.destroy();
+    nationalityChart = new Chart(ctx, { type: 'bar', data: { labels: Object.keys(nationalities), datasets: [{ label: 'عدد الموظفين', data: Object.values(nationalities), backgroundColor: '#1a5f7a' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+}
+
+function renderPositionChart() {
+    const employees = Storage.get('employees') || [];
+    const positions = {};
+    employees.forEach(e => { positions[e.position] = (positions[e.position] || 0) + 1; });
+    const ctx = document.getElementById('positionChart');
+    if (!ctx) return;
+    if (positionChart) positionChart.destroy();
+    positionChart = new Chart(ctx, { type: 'pie', data: { labels: Object.keys(positions), datasets: [{ data: Object.values(positions), backgroundColor: ['#1a5f7a', '#159895', '#57c5b6', '#e74c3c', '#f39c12', '#27ae60'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } } });
+}
+
+function renderSalaryChart() {
+    const employees = Storage.get('employees') || [];
+    const ctx = document.getElementById('salaryChart');
+    if (!ctx) return;
+    if (salaryChart) salaryChart.destroy();
+    salaryChart = new Chart(ctx, { type: 'bar', data: { labels: employees.map(e => e.name), datasets: [{ label: 'الراتب', data: employees.map(e => e.salary), backgroundColor: '#1a5f7a' }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } } });
+}
+
+// ==================== SALARY LADDER ====================
+function renderSalaryLadder() {
+    const employees = Storage.get('employees') || [];
+    const settings = Storage.get('settings') || { annualIncrease: 10 };
+    document.getElementById('annualIncreaseDisplay').textContent = settings.annualIncrease;
+    const tbody = document.getElementById('salaryLadderTable');
+    tbody.innerHTML = '';
+    employees.forEach((emp, i) => {
+        const base = emp.originalSalary || emp.baseSalary || emp.salary;
+        const rates = [];
+        for (let y = 1; y <= 5; y++) rates.push(base * Math.pow(1 + settings.annualIncrease / 100, y));
+        tbody.innerHTML += `<tr><td>${i+1}</td><td>${emp.name}</td><td>${emp.branch}</td><td>${emp.position}</td><td>${formatMoney(base)}</td><td><strong>${formatMoney(emp.salary)}</strong></td>${rates.map(r => `<td>${formatMoney(r)}</td>`).join('')}</tr>`;
+    });
+    if (employees.length === 0) tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted py-4">لا يوجد موظفين</td></tr>';
+}
+
+// ==================== INIT ====================
+function initApp() {
+    Storage.init();
+    document.getElementById('currentDate').textContent = new Date().toLocaleDateString('ar-SA');
+    renderDashboard();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    Storage.init();
+    document.getElementById('loginForm').addEventListener('submit', login);
+    checkAuth();
+});
+</script>
+</body>
+</html>
